@@ -1,7 +1,5 @@
 package me.haimgr.jsonvalue
 
-import kotlin.math.absoluteValue
-
 
 ///////////////////////
 // Parser
@@ -290,78 +288,53 @@ private fun Parser.readNumber(): Value {
     val convertedNumber = numberString.toIntOrNull()
         ?: numberString.toLongOrNull()
         ?: numberString.toDouble()
-    return (convertedNumber as Number).jsonCanonized()
-    val int = readInteger()
-    val frac = readFraction()
-    val exp = readExponent()
-    val number: Number = when {
-        frac == 0.0 && exp == 0 -> int
-        else -> when {
-            exp == 0 -> int + frac
-            else -> {
-                val expFactor = if (exp > 0) 10.0 else 0.1
-                generateSequence(int + frac) { it * expFactor }
-                    .take(1 + exp.absoluteValue)
-                    .last()
-            }
-        }
-    }
-    return number.jsonCanonized()
+    return (convertedNumber as Number).toJsonCanonized()
 }
 
-private fun Parser.readExponent(): Int {
-    return when {
+private fun Parser.readExponent() {
+    when {
         peek('E') || peek('e') -> {
             read()
-            val minus = when {
-                peek('+') -> { read(); false }
-                peek('-') -> { read(); true }
-                else -> false
+            when {
+                peek('+') -> read()
+                peek('-') -> read()
+                else -> Unit
             }
-            readDigits().toInt().let { if(minus) -it else it }
+            readDigits()
         }
-        else -> 0
+        else -> Unit
     }
 }
 
-private fun Parser.readFraction(): Double {
+private fun Parser.readFraction() {
     when {
         peek('.') -> {
             read()
-            var frac = 0.0
-            var dec = 0.1
-            val firstDigit = readDigit()
-            frac += dec * firstDigit
+            readDigit()
             while (peekDigit()) {
-                dec /= 10
-                frac += dec * readDigit()
+                read()
             }
-            return frac
         }
-        else -> return 0.0
+        else -> Unit
     }
 }
 
-private fun Parser.readInteger(): Long {
-    val minus = if (peek('-')) {
+private fun Parser.readInteger() {
+    if (peek('-')) {
         read()
-        true
-    } else {
-        false
     }
-    return readDigits().let { if (minus) -it else it }
+    readDigits()
 }
 
-private fun Parser.readDigits(): Long {
+private fun Parser.readDigits() {
     val first = readDigit()
     if (first == 0) {
-        return first.toLong()
+        return
     } else {
-        var number = first.toLong()
         while (peekDigit()) {
-            number = number * 10 + readDigit()
+            read()
         }
-        return number
+        return
     }
 }
 
