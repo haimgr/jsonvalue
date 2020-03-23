@@ -5,11 +5,9 @@ package me.haimgr.jsonvalue
 // Parser
 ///////////////////////
 
-open class JsonValueParseException internal constructor(message: String, cause: Throwable? = null) : Exception(message, cause)
+private class Parser(private val text: String) {
 
-private class Parser(private val text: String, position: Int = 0) {
-
-    var position: Int = position
+    var position: Int = 0
         private set
 
     private val remainingCount
@@ -22,13 +20,15 @@ private class Parser(private val text: String, position: Int = 0) {
     }
 
     fun charAt(offset: Int): Char {
-        require(offset in 0 until remainingCount) { throw IndexOutOfBoundsException("offset: $offset, remainingCount: $remainingCount") }
+        if (offset !in 0 until remainingCount) {
+            throw IndexOutOfBoundsException("offset: $offset, remainingCount: $remainingCount")
+        }
         return text[position + offset]
     }
 
     fun endsAt(offset: Int): Boolean = offset !in 0 until remainingCount
 
-    fun throwExpected(vararg names: String): Nothing {
+   fun getLineAndPosition(): IntArray {
         var lineCount = 1
         var lastNewLinePosition = 0
         val position = this.position
@@ -38,11 +38,25 @@ private class Parser(private val text: String, position: Int = 0) {
                 lastNewLinePosition = i
             }
         }
-        val linePosition = position - lastNewLinePosition
-        throw JsonValueParseException("Expected ${names.joinToString(" or ")} at line $lineCount position $linePosition")
+        val linePosition = 1 + position - lastNewLinePosition
+        return intArrayOf(lineCount, linePosition)
     }
 
-    fun clone(): Parser = Parser(text, position)
+
+    private var bufferStart = -1
+
+    fun startBuffer() {
+        check(bufferStart == -1){"A buffer has already started."}
+        bufferStart = position
+    }
+
+    fun endBuffer(): String {
+        val bufferStart = this.bufferStart
+        val position = this.position
+        check(bufferStart != -1){"A buffer has not yet started."}
+        this.bufferStart = -1
+        return text.substring(bufferStart, position)
+    }
 
 }
 
@@ -61,10 +75,7 @@ private fun Parser.peek(text: String): Boolean {
 
 private fun Parser.peek(char: Char): Boolean = !endsAt(0) && charAt(0) == char
 
-private typealias CharPredicate = (Char) -> Boolean
-
-private inline fun Parser.peek(predicate: CharPredicate): Boolean = !endsAt(0) && predicate(charAt(0))
-
+private inline fun Parser.peek(predicate: (Char) -> Boolean): Boolean = !endsAt(0) && predicate(charAt(0))
 
 ///////////////////////
 // Utils
@@ -85,6 +96,18 @@ private fun Parser.readText(text: Char) {
     }
 }
 
+private fun Parser.throwExpected(vararg names: String): Nothing {
+    val (lineCount, linePosition) = getLineAndPosition()
+    throw JsonValueException("Expected ${names.joinToString(" or ")} at line $lineCount position $linePosition")
+}
+
+private fun Parser.throwMessage(message: String): Nothing {
+    val (lineCount, linePosition) = getLineAndPosition()
+    throw JsonValueException("$message at line $lineCount position $linePosition")
+}
+
+
+
 private fun Parser.readLengthOf(text: String) {
     read(text.length)
 }
@@ -96,54 +119,51 @@ private fun Parser.readLengthOf(text: String) {
  * ```
  * multiple
  *   prefix ws postfix
- *   prefix elements postfix
+ *   prefix ws items postfix
  *
- * elements
- *  element
- *  element separator elements
+ * items
+ *  item
+ *  item separator items
  *  ```
  *
- *  `element` is specified by [readElement] and [isElementFirst] parameter.
+ *  `item` is specified by [readItem] and [isItemFirst] parameter.
  *
  */
-private fun <T> Parser.readMultiple(
+private fun Parser.readMultiple(
     prefix: Char,
     postfix: Char,
     separator: Char,
-    elementsName: String,
-    isElementFirst: CharPredicate,
-    readElement: Parser.() -> T
-): List<T> {
+    itemName: String,
+    isItemFirst: (Char) -> Boolean,
+    readItem: Parser.() -> Unit
+) {
     readText(prefix)
     readWS()
     return when {
         peek(postfix) -> {
             readText(postfix)
-            emptyList()
         }
-        peek(isElementFirst) -> {
-            val elements = readMultipleElements(readElement, separator, postfix)
+        peek(isItemFirst) -> {
+            readItem()
+            readMultipleItems(postfix, separator, readItem)
             readText(postfix)
-            elements
         }
-        else -> throwExpected("'$postfix'", elementsName)
+        else -> throwExpected("'$postfix'", itemName)
     }
 }
 
-private fun <T> Parser.readMultipleElements(
-    readElement: Parser.() -> T,
+private fun Parser.readMultipleItems(
+    postfix: Char,
     separator: Char,
-    postfix: Char
-): List<T> {
-    val firstElement = readElement()
-    val elements = arrayListOf(firstElement)
+    readItem: Parser.() -> Unit
+) {
     while (true) {
         when {
             peek(separator) -> {
                 readText(separator)
-                elements += readElement()
+                readItem()
             }
-            peek(postfix) -> return elements
+            peek(postfix) -> return
             else -> throwExpected("'$postfix'", "'$separator'")
         }
     }
@@ -157,11 +177,13 @@ private fun <T> Parser.readMultipleElements(
 private const val ESCAPE_CHARACTERS: String = "\"\\/bnrtfu"
 private const val ESCAPE_CHARACTERS_RESOLUTION: String = "\"\\/\b\n\r\t"
 
+private typealias Value = Any?
+
 private fun Parser.readValue(): Value {
     return when {
         peek('{') -> readObject()
         peek('[') -> readArray()
-        peekNumber() -> readNumber()
+        peek(Char::isStartOfNumber) -> readNumber()
         peek('"') -> readString()
         peek("true") -> true.also { readLengthOf("true") }
         peek("false") -> false.also { readLengthOf("false") }
@@ -171,21 +193,22 @@ private fun Parser.readValue(): Value {
 }
 
 private fun Parser.readObject(): Value {
-    return readMultiple(
+    val map = mutableMapOf<String, Value>()
+    readMultiple(
         prefix = '{',
         postfix = '}',
         separator = ',',
-        elementsName = "member",
-        isElementFirst = { it == '"' },
-        readElement = { readMember() }
-    ).toMapDistinct().toImmutable()
-}
-
-private fun <K, V> Iterable<Pair<K, V>>.toMapDistinct(): Map<K, V> {
-    if (this is Collection<*> && this.isEmpty()) return emptyMap()
-    val keySet = linkedSetOf<K>()
-    for ((k, _) in this) if (!keySet.add(k)) throw JsonValueParseException("Multiple entries for property '$k'.")
-    return toMap()
+        itemName = "member",
+        isItemFirst = { it in "\"" },
+        readItem = {
+            val (key, value) = readMember()
+            if (map.containsKey(key)) {
+                throwMessage("Object with duplicated property '$key'")
+            }
+            map[key] = value
+        }
+    )
+    return map.toImmutable()
 }
 
 private fun Parser.readMember(): Pair<String, Value> {
@@ -198,14 +221,16 @@ private fun Parser.readMember(): Pair<String, Value> {
 }
 
 private fun Parser.readArray(): Value {
-    return readMultiple(
+    val list = arrayListOf<Value>()
+    readMultiple(
         prefix = '[',
         postfix = ']',
         separator = ',',
-        elementsName = "element",
-        isElementFirst = { it in "[{0123456789\"tfn" },
-        readElement = { readElement() }
-    ).toImmutable()
+        itemName = "element",
+        isItemFirst = Char::isStartOfValue,
+        readItem = { list += readElement() }
+    )
+    return list.toImmutable()
 }
 
 private fun Parser.readElement(): Value {
@@ -279,15 +304,17 @@ private fun Char.toHex(): Int {
 }
 
 private fun Parser.readNumber(): Value {
-    val p = clone()
-    p.readInteger()
-    p.readFraction()
-    p.readExponent()
-    val numberSize = p.position - position
-    val numberString = String(CharArray(numberSize){ read() })
+    startBuffer()
+    readInteger()
+    readFraction()
+    readExponent()
+    val numberString = endBuffer()
     val convertedNumber = numberString.toIntOrNull()
         ?: numberString.toLongOrNull()
-        ?: numberString.toDouble()
+        ?: numberString.toDoubleOrNull()
+    if (convertedNumber == null) {
+        throwMessage("Cannot parse number '$numberString'")
+    }
     return (convertedNumber as Number).toJsonCanonized()
 }
 
@@ -338,19 +365,21 @@ private fun Parser.readDigits() {
     }
 }
 
-private fun Parser.peekDigit() = peek { it in '0'..'9' }
-
-private fun Parser.peekNumber() = peek { it in '0'..'9' || it == '-' }
-
 private fun Parser.readWS() {
     while(peek { it in "\u0020\u000D\u000A\u0009" }) {
         read()
     }
 }
 
+private fun Parser.peekDigit() = peek { it in '0'..'9' }
+
+private fun Char.isStartOfNumber() = this in '0'..'9' || this == '-'
+
+private fun Char.isStartOfValue() = this in '0'..'9' || this in "[{-\"tfn"
+
 
 ////////////////////////
-// API
+// Internal API
 ////////////////////////
 
 internal fun parseJsonValueRaw(string: String): Value {

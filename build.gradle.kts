@@ -1,13 +1,14 @@
 plugins {
-    id("org.jetbrains.kotlin.multiplatform") version "1.3.61"
+    id("org.jetbrains.kotlin.multiplatform") version "1.3.70"
     id("maven-publish")
 }
 
 group = "me.haimgr"
-version = "0.1.1"
+version = "0.1.2"
 
 repositories {
     mavenCentral()
+    jcenter()
 }
 
 kotlin {
